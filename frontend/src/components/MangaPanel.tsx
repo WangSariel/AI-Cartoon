@@ -1,0 +1,1206 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ChevronUp, ChevronDown, Download, ImageIcon, Loader2, Sparkles, Pencil, RefreshCw, Check, X, ImagePlus, Trash2, Square, CircleAlert } from 'lucide-react';
+import {
+  generateMangaStream,
+  generateScenes,
+  getScenes,
+  updateScenes,
+  regenerateImage,
+  getCharacters,
+  saveCharacters,
+  resetChapterCharacters,
+  getChapterRefImages,
+  addChapterRefImage,
+  deleteChapterRefImage,
+  getChapterAssetGroup,
+  setChapterAssetGroup,
+  getColorMode,
+  setColorMode,
+  getImageCount,
+  setImageCount,
+  ALLOWED_IMAGE_COUNTS,
+  mangaImageUrl,
+  mangaThumbUrl,
+  type Chapter,
+  type MangaProgress,
+  type ColorMode,
+  type RefSource,
+  type RefImage,
+  type CharacterSource,
+  type AssetGroup,
+} from '../api';
+import { genStore } from '../genStore';
+
+interface Props {
+  chapter: Chapter | null;
+  onChapterRefresh?: (chapterId: number) => void;
+}
+
+interface ImageItem {
+  image_number: number;
+  image_path: string;
+  prompt: string;
+}
+
+type Phase = 'idle' | 'generating-scenes' | 'editing-scenes' | 'generating-images';
+const DEFAULT_IMAGE_COUNT = 10;
+
+export default function MangaPanel({ chapter, onChapterRefresh }: Props) {
+  const [phase, setPhase] = useState<Phase>('idle');
+  const [progress, setProgress] = useState({ current: 0, total: DEFAULT_IMAGE_COUNT });
+  const [statusMsg, setStatusMsg] = useState('');
+  const [images, setImages] = useState<ImageItem[]>([]);
+  const [lightboxIdx, setLightboxIdx] = useState<number>(-1);
+  const [errorMsg, setErrorMsg] = useState('');
+  const [scenes, setScenes] = useState<string[]>([]);
+  const [expandedScenes, setExpandedScenes] = useState<Set<number>>(() => new Set());
+  const [editingIdx, setEditingIdx] = useState<number>(-1);
+  const [editText, setEditText] = useState('');
+  const [savingScenes, setSavingScenes] = useState(false);
+  const [regenIdx, setRegenIdx] = useState<number>(-1);
+  const [charText, setCharText] = useState('');
+  const [charSource, setCharSource] = useState<CharacterSource>('none');
+  const [assetGroups, setAssetGroups] = useState<AssetGroup[]>([]);
+  const [selectedAssetGroupId, setSelectedAssetGroupId] = useState<number | null>(null);
+  const [assetGroupSaving, setAssetGroupSaving] = useState(false);
+  const [charEditing, setCharEditing] = useState(false);
+  const [charDraft, setCharDraft] = useState('');
+  const [charSaving, setCharSaving] = useState(false);
+  const [charExpanded, setCharExpanded] = useState(false);
+  const [refImages, setRefImages] = useState<RefImage[]>([]);
+  const [refSource, setRefSource] = useState<RefSource>('none');
+  const [refMax, setRefMax] = useState(4);
+  const [refUploading, setRefUploading] = useState(false);
+  const [refModalOpen, setRefModalOpen] = useState(false);
+  const [colorMode, setColorModeState] = useState<ColorMode>('bw');
+  const [imageCount, setImageCountState] = useState(DEFAULT_IMAGE_COUNT);
+  const [showColorMenu, setShowColorMenu] = useState(false);
+  const colorMenuRef = useRef<HTMLDivElement>(null);
+  const refFileRef = useRef<HTMLInputElement>(null);
+  const lightboxRef = useRef<HTMLDivElement>(null);
+  const chapterLoadRequestRef = useRef(0);
+  const sceneAbortRef = useRef<AbortController | null>(null);
+  const mangaAbortRef = useRef<Map<number, AbortController>>(new Map());
+
+  // Subscribe to module-level generation store so we re-render when any chapter's gen state changes
+  const [, setStoreTick] = useState(0);
+  useEffect(() => genStore.subscribe(() => setStoreTick((t) => t + 1)), []);
+  const liveGen = chapter ? genStore.get(chapter.id) : undefined;
+  const isLiveGenerating = !!(liveGen && liveGen.active);
+
+  // Reset state when chapter changes
+  useEffect(() => {
+    // Abort any in-flight scene generation when switching chapters
+    sceneAbortRef.current?.abort();
+    sceneAbortRef.current = null;
+    const requestId = ++chapterLoadRequestRef.current;
+    setImages([]);
+    // Don't downgrade phase if there's an ongoing generation for this new chapter;
+    // the derived `generating` flag below will reflect it via genStore.
+    setPhase('idle');
+    setProgress({ current: 0, total: DEFAULT_IMAGE_COUNT });
+    setStatusMsg('');
+    setErrorMsg('');
+    setLightboxIdx(-1);
+    setScenes([]);
+    setExpandedScenes(new Set());
+    setEditingIdx(-1);
+    setRegenIdx(-1);
+    setCharText('');
+    setCharSource('none');
+    setAssetGroups([]);
+    setSelectedAssetGroupId(null);
+    setAssetGroupSaving(false);
+    setCharEditing(false);
+    setCharExpanded(false);
+    setRefImages([]);
+    setRefSource('none');
+    setRefModalOpen(false);
+    setColorModeState('bw');
+    setImageCountState(DEFAULT_IMAGE_COUNT);
+    setShowColorMenu(false);
+    // Load existing scenes and characters if available
+    if (chapter) {
+      getChapterAssetGroup(chapter.id).then((r) => {
+        if (chapterLoadRequestRef.current !== requestId) return;
+        setAssetGroups(r.groups);
+        setSelectedAssetGroupId(r.selected_group_id ?? null);
+      }).catch(() => {});
+      getChapterRefImages(chapter.id).then((r) => {
+        if (chapterLoadRequestRef.current !== requestId) return;
+        setRefImages(r.images);
+        setRefSource(r.source ?? (r.images.length ? 'chapter' : 'none'));
+        setRefMax(r.max);
+      }).catch(() => {});
+      getColorMode(chapter.id).then((m) => {
+        if (chapterLoadRequestRef.current === requestId) setColorModeState(m);
+      }).catch(() => {});
+      getImageCount(chapter.id).then((c) => {
+        if (chapterLoadRequestRef.current === requestId) setImageCountState(c);
+      }).catch(() => {});
+      getScenes(chapter.id).then((s) => {
+        if (chapterLoadRequestRef.current !== requestId) return;
+        if (s.length > 0) {
+          setScenes(s);
+          setPhase('editing-scenes');
+        }
+      }).catch(() => {});
+      getCharacters(chapter.id).then((r) => {
+        if (chapterLoadRequestRef.current !== requestId) return;
+        setCharText(r.characters || '');
+        setCharSource(r.source);
+      }).catch(() => {});
+    }
+  }, [chapter?.id]);
+
+  // Load existing images from chapter
+  const existingImages: ImageItem[] =
+    chapter?.images.map((img) => ({
+      image_number: img.image_number,
+      image_path: img.image_path,
+      prompt: img.prompt || '',
+    })) ?? [];
+
+  // While generation is running for this chapter, prefer live images from the store
+  const displayImages = isLiveGenerating
+    ? liveGen!.images
+    : images.length > 0
+      ? images
+      : existingImages;
+  const imageByNumber = new Map(displayImages.map((img) => [img.image_number, img]));
+  const imageIndexByNumber = new Map(displayImages.map((img, idx) => [img.image_number, idx]));
+  const gallerySlots = scenes.length > 0
+    ? scenes.map((scene, idx) => ({
+      image_number: idx + 1,
+      scene,
+      img: imageByNumber.get(idx + 1),
+    }))
+    : displayImages.map((img) => ({
+      image_number: img.image_number,
+      scene: img.prompt || '',
+      img,
+    }));
+  const lightboxImg = lightboxIdx >= 0 ? displayImages[lightboxIdx] : null;
+
+  const refreshChapterAssetFallback = async (chapterId: number) => {
+    const [chars, refs] = await Promise.all([getCharacters(chapterId), getChapterRefImages(chapterId)]);
+    setCharText(chars.characters || '');
+    setCharSource(chars.source);
+    setRefImages(refs.images);
+    setRefSource(refs.source ?? (refs.images.length ? 'chapter' : 'none'));
+    setRefMax(refs.max);
+  };
+
+  const handleSelectAssetGroup = async (value: string) => {
+    if (!chapter) return;
+    const nextGroupId = value === '' ? null : Number(value);
+    const previous = selectedAssetGroupId;
+    setSelectedAssetGroupId(nextGroupId);
+    setAssetGroupSaving(true);
+    try {
+      const result = await setChapterAssetGroup(chapter.id, nextGroupId);
+      setAssetGroups(result.groups);
+      setSelectedAssetGroupId(result.selected_group_id ?? null);
+      await refreshChapterAssetFallback(chapter.id);
+    } catch (err: any) {
+      setSelectedAssetGroupId(previous);
+      setErrorMsg(`切换设定组失败: ${err.message}`);
+    } finally {
+      setAssetGroupSaving(false);
+    }
+  };
+
+  // ── Scene generation ──
+  const handleGenerateScenes = async () => {
+    if (!chapter) return;
+    if (!chapter.messages || chapter.messages.length === 0) {
+      alert('请先在左侧进行对话');
+      return;
+    }
+    setPhase('generating-scenes');
+    setErrorMsg('');
+    const controller = new AbortController();
+    sceneAbortRef.current = controller;
+    const requestId = chapterLoadRequestRef.current;
+    const hadScenes = scenes.length > 0;
+    try {
+      const result = await generateScenes(chapter.id, controller.signal);
+      if (chapterLoadRequestRef.current !== requestId) return;
+      setScenes(result);
+      setPhase('editing-scenes');
+    } catch (err: any) {
+      if (chapterLoadRequestRef.current !== requestId) return;
+      if (err.name === 'AbortError') {
+        setPhase(hadScenes ? 'editing-scenes' : 'idle');
+      } else {
+        setErrorMsg(err.message);
+        setPhase(hadScenes ? 'editing-scenes' : 'idle');
+      }
+    } finally {
+      if (sceneAbortRef.current === controller) {
+        sceneAbortRef.current = null;
+      }
+    }
+  };
+
+  const handleAbortScenes = () => {
+    sceneAbortRef.current?.abort();
+    sceneAbortRef.current = null;
+  };
+
+  // ── Scene editing ──
+  const handleSceneEdit = (idx: number) => {
+    setEditingIdx(idx);
+    setEditText(scenes[idx]);
+  };
+
+  const handleSceneSave = (idx: number) => {
+    const updated = [...scenes];
+    updated[idx] = editText;
+    setScenes(updated);
+    setEditingIdx(-1);
+  };
+
+  const toggleSceneExpanded = (idx: number) => {
+    setExpandedScenes((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
+      return next;
+    });
+  };
+
+  const handleSaveAllScenes = async () => {
+    if (!chapter) return;
+    setSavingScenes(true);
+    try {
+      await updateScenes(chapter.id, scenes);
+    } catch (err: any) {
+      setErrorMsg(err.message);
+    } finally {
+      setSavingScenes(false);
+    }
+  };
+
+  // ── Single image regeneration ──
+  const handleRegenImage = async (imageNumber: number) => {
+    if (!chapter) return;
+    const prompt = scenes[imageNumber - 1];
+    if (!prompt) return;
+    setRegenIdx(imageNumber);
+    setErrorMsg('');
+    try {
+      // Save scenes first
+      await updateScenes(chapter.id, scenes);
+      const result = await regenerateImage(chapter.id, imageNumber, prompt);
+      // Update in images list
+      const newItem: ImageItem = {
+        image_number: result.image_number,
+        image_path: result.image_path,
+        prompt: result.prompt,
+      };
+      setImages((prev) => {
+        const updated = prev.length > 0 ? [...prev] : [...existingImages];
+        const idx = updated.findIndex((i) => i.image_number === imageNumber);
+        if (idx >= 0) updated[idx] = newItem;
+        else updated.push(newItem);
+        return updated.sort((a, b) => a.image_number - b.image_number);
+      });
+    } catch (err: any) {
+      setErrorMsg(`第${imageNumber}张重新生成失败: ${err.message}`);
+    } finally {
+      setRegenIdx(-1);
+    }
+  };
+
+  // ── Close color menu on outside click ──
+  useEffect(() => {
+    if (!showColorMenu) return;
+    const handler = (e: MouseEvent) => {
+      if (colorMenuRef.current && !colorMenuRef.current.contains(e.target as Node)) {
+        setShowColorMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showColorMenu]);
+
+  // ── Color mode selection ──
+  const handleSelectColorMode = async (mode: ColorMode) => {
+    if (!chapter) return;
+    setShowColorMenu(false);
+    await setColorMode(chapter.id, mode);
+    setColorModeState(mode);
+  };
+
+  // ── Image generation ──
+
+  const handleGenerateImages = async () => {
+    if (!chapter) return;
+    // Already generating for this chapter — ignore
+    if (genStore.get(chapter.id)?.active) return;
+    // Save scenes first
+    try {
+      await updateScenes(chapter.id, scenes);
+    } catch (err: any) {
+      setErrorMsg(`保存分镜失败: ${err.message}`);
+      return;
+    }
+
+    setImages([]);
+    setErrorMsg('');
+
+    const targetId = chapter.id;
+    const targetTotal = imageCount;
+    genStore.start(targetId, targetTotal);
+
+    const controller = generateMangaStream(targetId, (event: MangaProgress) => {
+      switch (event.type) {
+        case 'status':
+          genStore.patch(targetId, { statusMsg: event.data.message });
+          break;
+        case 'waiting':
+          genStore.patch(targetId, {
+            statusMsg: event.data.message || `图片服务仍在处理，已等待 ${event.data.waited ?? '?'} 秒…`,
+          });
+          break;
+        case 'retrying':
+          genStore.patch(targetId, {
+            statusMsg: event.data.switching_to_fallback
+              ? `${event.data.message || '图片服务暂时不可用，准备重试'}，下次将切换备用 endpoint`
+              : event.data.message || '图片服务暂时不可用，正在重试…',
+          });
+          break;
+        case 'downloading':
+          genStore.patch(targetId, { statusMsg: event.data.message || '正在下载生成结果…' });
+          break;
+        case 'progress':
+          genStore.patch(targetId, {
+            current: event.data.current,
+            total: event.data.total,
+            statusMsg: `正在生成第 ${event.data.current}/${event.data.total} 张漫画…`,
+          });
+          break;
+        case 'image':
+          genStore.pushImage(targetId, {
+            image_number: event.data.image_number,
+            image_path: event.data.image_path,
+            prompt: event.data.prompt,
+          });
+          if (event.data.image_number >= targetTotal) {
+            mangaAbortRef.current.delete(targetId);
+            genStore.finish(targetId);
+            onChapterRefresh?.(targetId);
+            setTimeout(() => genStore.clear(targetId), 800);
+          }
+          break;
+        case 'done':
+          mangaAbortRef.current.delete(targetId);
+          genStore.finish(targetId);
+          onChapterRefresh?.(targetId);
+          setTimeout(() => genStore.clear(targetId), 800);
+          break;
+        case 'error':
+          mangaAbortRef.current.delete(targetId);
+          genStore.finish(targetId, event.data.error || '未知错误');
+          break;
+      }
+    });
+    mangaAbortRef.current.set(targetId, controller);
+  };
+
+  const handleAbortManga = () => {
+    if (!chapter) return;
+    const targetId = chapter.id;
+    const state = genStore.get(targetId);
+    mangaAbortRef.current.get(targetId)?.abort();
+    mangaAbortRef.current.delete(targetId);
+    if (state?.images.length) {
+      setImages(state.images);
+    }
+    genStore.finish(targetId, '已中止生成');
+    window.setTimeout(() => onChapterRefresh?.(targetId), 700);
+  };
+
+  // ── Lightbox keyboard/scroll navigation ──
+  const handleLightboxNav = useCallback((dir: 'prev' | 'next') => {
+    setLightboxIdx((cur) => {
+      if (dir === 'prev' && cur > 0) return cur - 1;
+      if (dir === 'next' && cur < displayImages.length - 1) return cur + 1;
+      return cur;
+    });
+  }, [displayImages.length]);
+
+  useEffect(() => {
+    if (lightboxIdx < 0) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { e.preventDefault(); handleLightboxNav('prev'); }
+      if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { e.preventDefault(); handleLightboxNav('next'); }
+      if (e.key === 'Escape') setLightboxIdx(-1);
+    };
+    const wheelHandler = (e: WheelEvent) => {
+      e.preventDefault();
+      if (e.deltaY < 0) handleLightboxNav('prev');
+      if (e.deltaY > 0) handleLightboxNav('next');
+    };
+    window.addEventListener('keydown', handler);
+    const lb = lightboxRef.current;
+    lb?.addEventListener('wheel', wheelHandler, { passive: false });
+    return () => {
+      window.removeEventListener('keydown', handler);
+      lb?.removeEventListener('wheel', wheelHandler);
+    };
+  }, [lightboxIdx, handleLightboxNav]);
+
+  const generating = isLiveGenerating || phase === 'generating-images';
+
+  // Tick every 1s while generating so the stall indicator re-renders.
+  const [, setNowTick] = useState(0);
+  useEffect(() => {
+    if (!generating) return;
+    const id = window.setInterval(() => setNowTick((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [generating]);
+
+  const stallSeconds = isLiveGenerating && liveGen
+    ? Math.max(0, Math.floor((Date.now() - liveGen.lastEventAt) / 1000))
+    : 0;
+  const isStalled = isLiveGenerating && stallSeconds >= 30;
+
+  const liveProgress = isLiveGenerating
+    ? { current: liveGen!.current, total: liveGen!.total }
+    : progress;
+  const liveStatusMsg = isLiveGenerating ? liveGen!.statusMsg : statusMsg;
+  const liveErrorMsg = liveGen?.errorMsg || errorMsg;
+  const hasImages = displayImages.length > 0;
+  const canChangeImageCount = !generating && scenes.length === 0 && !hasImages;
+  const activeImageCount = liveProgress.total || imageCount;
+
+  return (
+    <div className="flex flex-col h-full bg-gray-950">
+      {/* Header */}
+      <div className="px-3 md:px-5 py-3 border-b border-gray-800 flex items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold text-gray-200 tracking-wide uppercase shrink-0 hidden md:block">
+          第 {chapter?.chapter_number ?? '–'} 话 · 漫画
+        </h2>
+        <div className="flex items-center gap-1.5 md:gap-2 flex-wrap justify-end">
+          {assetGroups.length > 0 && (
+            <select
+              value={selectedAssetGroupId ?? ''}
+              onChange={(e) => handleSelectAssetGroup(e.target.value)}
+              disabled={!chapter || generating || assetGroupSaving}
+              className="max-w-[160px] px-2 py-1.5 text-xs font-medium rounded-md bg-gray-800 text-gray-300 border border-gray-700 outline-none focus:border-violet-500 transition-colors disabled:opacity-50"
+              title="选择本话继承的全局角色卡和垫图组"
+            >
+              {assetGroups.map((group) => (
+                <option key={group.id ?? 'default'} value={group.id ?? ''}>
+                  {group.is_default ? '默认组' : group.name}
+                </option>
+              ))}
+            </select>
+          )}
+          {/* 垫图 (Reference Images, 多图) */}
+          <div className="flex items-center gap-1">
+            <input
+              ref={refFileRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (!file || !chapter) return;
+                setRefUploading(true);
+                try {
+                  const reader = new FileReader();
+                  const b64 = await new Promise<string>((resolve) => {
+                    reader.onload = () => resolve((reader.result as string).split(',')[1]);
+                    reader.readAsDataURL(file);
+                  });
+                  const r = await addChapterRefImage(chapter.id, b64);
+                  setRefImages(r.images);
+                  setRefSource(r.source ?? 'chapter');
+                  setRefMax(r.max);
+                } catch (err: any) {
+                  setErrorMsg(`上传垫图失败: ${err.message}`);
+                } finally {
+                  setRefUploading(false);
+                  e.target.value = '';
+                }
+              }}
+            />
+            <button
+              onClick={() => setRefModalOpen(true)}
+              disabled={!chapter}
+              className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors
+                ${refImages.length > 0
+                  ? 'bg-emerald-900/50 hover:bg-emerald-800 text-emerald-300 border border-emerald-700'
+                  : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                } disabled:opacity-40`}
+              title={
+                refImages.length > 0
+                  ? refSource === 'story' || refSource === 'asset_group'
+                    ? `全局垫图 ${refImages.length} 张· 点击查看/管理`
+                    : `已设置 ${refImages.length} 张垫图· 点击查看/管理`
+                  : '点击上传垫图参考'
+              }
+            >
+              <ImagePlus size={13} />
+              {refImages.length > 0
+                ? refSource === 'story' || refSource === 'asset_group'
+                  ? `全局垫图 ${refImages.length}`
+                  : `已垫图 ${refImages.length}`
+                : '垫图'}
+            </button>
+          </div>
+          {/* Image count selector */}
+          {!generating && (phase === 'idle' || phase === 'editing-scenes') && (
+            <select
+              value={imageCount}
+              onChange={async (e) => {
+                const count = Number(e.target.value);
+                const previous = imageCount;
+                setImageCountState(count);
+                if (chapter) {
+                  try {
+                    await setImageCount(chapter.id, count);
+                  } catch (err: any) {
+                    setImageCountState(previous);
+                    setErrorMsg(`保存生成张数失败: ${err.message}`);
+                  }
+                }
+              }}
+              disabled={!canChangeImageCount}
+              className="px-2 py-1.5 text-xs font-medium rounded-md bg-gray-800 text-gray-300 border border-gray-700 outline-none focus:border-violet-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+              title={canChangeImageCount ? '生成张数' : '已有分镜或图片时不能修改生成张数'}
+            >
+              {ALLOWED_IMAGE_COUNTS.map((n) => (
+                <option key={n} value={n}>{n}张</option>
+              ))}
+            </select>
+          )}
+          {hasImages && (
+            <button
+              onClick={() => {
+                displayImages.forEach((img) => {
+                  const a = document.createElement('a');
+                  a.href = mangaImageUrl(img.image_path);
+                  a.download = `panel_${img.image_number.toString().padStart(2, '0')}.png`;
+                  a.click();
+                });
+              }}
+              className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md
+                         bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors"
+            >
+              <Download size={13} />
+              下载
+            </button>
+          )}
+          {!generating && (phase === 'idle' || phase === 'editing-scenes') && (
+            <button
+              onClick={handleGenerateScenes}
+              disabled={!chapter || !chapter?.messages?.length}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md
+                         bg-violet-600 hover:bg-violet-500 text-white disabled:opacity-40
+                         disabled:cursor-not-allowed transition-colors"
+            >
+              <RefreshCw size={13} />
+              {scenes.length > 0 ? '重新生成分镜' : '生成分镜'}
+            </button>
+          )}
+          {!generating && phase === 'editing-scenes' && scenes.length > 0 && (
+            <>
+              {/* Color mode selector */}
+              <div className="relative" ref={colorMenuRef}>
+                <button
+                  onClick={() => setShowColorMenu((v) => !v)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors
+                    ${colorMode === 'color'
+                      ? 'bg-pink-900/50 hover:bg-pink-800 text-pink-300 border border-pink-700'
+                      : 'bg-gray-800 hover:bg-gray-700 text-gray-300'}`}
+                >
+                  {colorMode === 'color' ? (
+                    <span className="w-3 h-3 rounded-full bg-gradient-to-br from-pink-400 via-blue-400 to-green-400 shrink-0" />
+                  ) : (
+                    <span className="w-3 h-3 rounded-full bg-gradient-to-br from-white to-gray-600 shrink-0" />
+                  )}
+                  {colorMode === 'color' ? '彩色' : '黑白'}
+                  <ChevronDown size={11} className={`transition-transform ${showColorMenu ? 'rotate-180' : ''}`} />
+                </button>
+                {showColorMenu && (
+                  <div className="absolute right-0 top-full mt-1 w-40 rounded-lg border border-gray-700 bg-gray-900 shadow-xl z-50 overflow-hidden">
+                    <button
+                      onClick={() => handleSelectColorMode('bw')}
+                      className={`w-full flex items-center gap-2 px-3 py-2.5 text-xs transition-colors hover:bg-gray-800
+                        ${colorMode === 'bw' ? 'text-amber-400 font-semibold' : 'text-gray-300'}`}
+                    >
+                      <span className="w-4 h-4 rounded border-2 border-gray-500 bg-gradient-to-br from-white to-gray-900 shrink-0" />
+                      黑白漫画
+                      {colorMode === 'bw' && <Check size={12} className="ml-auto text-amber-400" />}
+                    </button>
+                    <button
+                      onClick={() => handleSelectColorMode('color')}
+                      className={`w-full flex items-center gap-2 px-3 py-2.5 text-xs transition-colors hover:bg-gray-800
+                        ${colorMode === 'color' ? 'text-amber-400 font-semibold' : 'text-gray-300'}`}
+                    >
+                      <span className="w-4 h-4 rounded border-2 border-gray-500 bg-gradient-to-br from-pink-400 via-blue-400 to-green-400 shrink-0" />
+                      彩色漫画
+                      {colorMode === 'color' && <Check size={12} className="ml-auto text-amber-400" />}
+                    </button>
+                  </div>
+                )}
+              </div>
+              {/* Generate button */}
+              <button
+                onClick={handleGenerateImages}
+                className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium rounded-md
+                           bg-amber-500 hover:bg-amber-400 text-gray-950 transition-colors"
+              >
+                <Sparkles size={13} />
+                {existingImages.length > 0 && existingImages.length < imageCount ? '继续生成漫画' : '生成漫画'}
+              </button>
+            </>
+          )}
+          {phase === 'generating-scenes' && (
+            <div className="flex items-center gap-2">
+              <span className="flex items-center gap-1.5 text-xs text-gray-400">
+                <Loader2 size={13} className="animate-spin" />
+                AI 生成分镜中…
+              </span>
+              <button
+                onClick={handleAbortScenes}
+                className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-md
+                           bg-red-900/50 hover:bg-red-800 text-red-300 border border-red-700 transition-colors"
+                title="停止生成分镜"
+              >
+                <Square size={11} />
+                停止
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      {generating && (
+        <div className="px-5 py-4 border-b border-gray-800 bg-gray-900/50">
+          <div className="flex items-center justify-between text-xs mb-3 gap-3">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-gray-300 font-medium truncate">{liveStatusMsg}</span>
+              {isStalled && (
+                <span
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/40 text-amber-300 text-[10px] font-medium whitespace-nowrap animate-pulse"
+                  title="图片服务响应较慢，正在继续等待（上游可能在排队）"
+                >
+                  <Loader2 size={10} className="animate-spin" />
+                  等待中 {stallSeconds}s
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={handleAbortManga}
+                className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-md
+                           bg-red-900/50 hover:bg-red-800 text-red-300 border border-red-700 transition-colors"
+                title="停止生成漫画"
+              >
+                <Square size={10} />
+                停止
+              </button>
+              <span className="text-amber-400 font-mono font-bold">
+                {Math.round((liveProgress.current / liveProgress.total) * 100)}%
+              </span>
+            </div>
+          </div>
+          <div className="w-full h-3 bg-gray-800 rounded-full overflow-hidden relative">
+            <div
+              className="h-full rounded-full transition-all duration-700 ease-out relative overflow-hidden"
+              style={{
+                width: `${Math.max((liveProgress.current / liveProgress.total) * 100, 2)}%`,
+                background: 'linear-gradient(90deg, #f59e0b, #fbbf24, #f59e0b)',
+                boxShadow: '0 0 12px rgba(245, 158, 11, 0.5)',
+              }}
+            >
+              <div
+                className="absolute inset-0 animate-[barbershop_1s_linear_infinite]"
+                style={{
+                  backgroundImage:
+                    'repeating-linear-gradient(115deg, transparent, transparent 8px, rgba(255,255,255,0.15) 8px, rgba(255,255,255,0.15) 16px)',
+                }}
+              />
+            </div>
+          </div>
+          <div className="flex justify-between mt-2 text-[10px] text-gray-600">
+            {Array.from({ length: liveProgress.total }, (_, i) => (
+              <span key={i} className={i < liveProgress.current ? 'text-amber-500' : ''}>
+                {i + 1}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Error banner */}
+      {liveErrorMsg && (
+        <div className="soft-error-banner mx-5 mt-3">
+          <CircleAlert size={18} className="soft-error-icon" strokeWidth={1.8} />
+          <div className="min-w-0">
+            <div className="soft-error-title">生成出错</div>
+            <div className="soft-error-message">{liveErrorMsg}</div>
+          </div>
+        </div>
+      )}
+
+      {/* Main content area */}
+      <div className="flex-1 overflow-y-auto px-3 md:px-5 py-4">
+        {/* Character profiles card */}
+        {(phase === 'idle' || phase === 'editing-scenes') && (
+          <div className="mb-4 rounded-lg border border-gray-800 bg-gray-900/60 overflow-hidden">
+            <button
+              onClick={() => setCharExpanded((v) => !v)}
+              className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wide hover:bg-gray-800/40 transition-colors"
+            >
+              <span className="flex items-center gap-1.5">
+                🎭 角色外貌卡
+                {charText && charSource === 'story' && (
+                  <span className="text-[10px] font-normal normal-case px-1.5 py-0.5 rounded bg-blue-900/50 text-blue-400 border border-blue-800/50">继承自首页</span>
+                )}
+                {charText && charSource === 'asset_group' && (
+                  <span className="text-[10px] font-normal normal-case px-1.5 py-0.5 rounded bg-violet-900/50 text-violet-300 border border-violet-800/50">来自设定组</span>
+                )}
+                {charText && charSource === 'chapter' && (
+                  <span className="text-[10px] font-normal normal-case px-1.5 py-0.5 rounded bg-emerald-900/50 text-emerald-400 border border-emerald-800/50">本话自定义</span>
+                )}
+                {!charText && '（未设定）'}
+              </span>
+              {charExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            </button>
+            {charExpanded && (
+              <div className="px-3 pb-3">
+                {charEditing ? (
+                  <>
+                    <textarea
+                      value={charDraft}
+                      onChange={(e) => setCharDraft(e.target.value)}
+                      className="w-full bg-gray-800 text-xs text-gray-200 rounded p-2 resize-none outline-none border border-gray-700 focus:border-violet-500 leading-relaxed"
+                      rows={12}
+                      placeholder={`角色名：塞蕾娜\n性别：女\n发色与发型：银灰色长发...\n（粘贴完整角色卡）`}
+                      autoFocus
+                    />
+                    <div className="flex justify-end gap-2 mt-2">
+                      <button
+                        onClick={() => setCharEditing(false)}
+                        className="px-2 py-1 text-xs rounded text-gray-500 hover:text-gray-300 hover:bg-gray-700 transition-colors"
+                      >取消</button>
+                      <button
+                        disabled={charSaving}
+                        onClick={async () => {
+                          if (!chapter) return;
+                          setCharSaving(true);
+                          try {
+                            await saveCharacters(chapter.id, charDraft);
+                            setCharText(charDraft);
+                            setCharSource('chapter');
+                            setCharEditing(false);
+                          } catch (err: any) {
+                            setErrorMsg(err.message);
+                          } finally {
+                            setCharSaving(false);
+                          }
+                        }}
+                        className="px-3 py-1 text-xs rounded bg-violet-600 hover:bg-violet-500 text-white disabled:opacity-40 transition-colors"
+                      >{charSaving ? '保存中…' : '保存（本话覆盖）'}</button>
+                    </div>
+                  </>
+                ) : charText ? (
+                  <>
+                    <pre className="text-xs text-gray-400 leading-relaxed whitespace-pre-wrap max-h-48 overflow-y-auto">{charText}</pre>
+                    <div className="mt-2 flex items-center gap-2 flex-wrap">
+                      <button
+                        onClick={() => { setCharDraft(charText); setCharEditing(true); }}
+                        className="flex items-center gap-1 text-xs text-violet-400 hover:text-violet-300 transition-colors"
+                      ><Pencil size={11} /> 编辑</button>
+                      {charSource === 'chapter' && (
+                        <button
+                          onClick={async () => {
+                            if (!chapter) return;
+                            try {
+                              await resetChapterCharacters(chapter.id);
+                              const r = await getCharacters(chapter.id);
+                              setCharText(r.characters || '');
+                              setCharSource(r.source);
+                            } catch (err: any) {
+                              setErrorMsg(err.message);
+                            }
+                          }}
+                          className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors"
+                        ><RefreshCw size={11} /> 恢复全局设定</button>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <button
+                    onClick={() => { setCharDraft(''); setCharEditing(true); }}
+                    className="text-xs text-violet-400 hover:text-violet-300 transition-colors"
+                  >+ 添加角色卡（粘贴 AI 生成的角色外貌描述）</button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Scene-only editor (when no images yet) */}
+        {scenes.length > 0 && displayImages.length === 0 && !generating && (
+          <div className="mb-6">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wide">分镜脚本（可编辑）</h3>
+              <button
+                onClick={handleSaveAllScenes}
+                disabled={savingScenes}
+                className="text-xs text-violet-400 hover:text-violet-300 transition-colors"
+              >
+                {savingScenes ? '保存中…' : '保存修改'}
+              </button>
+            </div>
+            <div className="space-y-2">
+              {scenes.map((scene, idx) => (
+                <div key={idx} className="rounded-lg border border-gray-800 bg-gray-900/60 overflow-hidden">
+                  <div className="flex items-start gap-2 p-3">
+                    <span className="shrink-0 w-6 h-6 flex items-center justify-center rounded bg-gray-800 text-[10px] text-gray-400 font-mono mt-0.5">
+                      {idx + 1}
+                    </span>
+                    {editingIdx === idx ? (
+                      <textarea
+                        value={editText}
+                        onChange={(e) => setEditText(e.target.value)}
+                        className="flex-1 bg-gray-800 text-sm text-gray-200 rounded p-2 resize-none outline-none border border-gray-700 focus:border-violet-500"
+                        rows={4}
+                        autoFocus
+                      />
+                    ) : (
+                      <div className="flex-1 min-w-0">
+                        <p className={`text-xs text-gray-400 leading-relaxed ${expandedScenes.has(idx) ? '' : 'line-clamp-2'}`}>
+                          {scene}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => toggleSceneExpanded(idx)}
+                          className="mt-1 text-xs text-violet-400 hover:text-violet-300 transition-colors"
+                        >
+                          {expandedScenes.has(idx) ? '收起' : '展开'}
+                        </button>
+                      </div>
+                    )}
+                    <div className="shrink-0 flex gap-1">
+                      {editingIdx === idx ? (
+                        <>
+                          <button onClick={() => handleSceneSave(idx)} className="p-1 rounded hover:bg-gray-700 text-green-400 transition-colors"><Check size={14} /></button>
+                          <button onClick={() => setEditingIdx(-1)} className="p-1 rounded hover:bg-gray-700 text-gray-500 transition-colors"><X size={14} /></button>
+                        </>
+                      ) : (
+                        <button onClick={() => handleSceneEdit(idx)} className="p-1 rounded hover:bg-gray-700 text-gray-600 hover:text-gray-300 transition-colors"><Pencil size={12} /></button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Empty state */}
+        {displayImages.length === 0 && !generating && scenes.length === 0 && (
+          <div className="flex flex-col items-center justify-center h-full text-gray-600 gap-3">
+            <ImageIcon size={48} strokeWidth={1} />
+            <span className="text-sm">对话后点击上方按钮生成分镜</span>
+          </div>
+        )}
+
+        {/* Images gallery with inline scene editor */}
+        <div className="space-y-6">
+          {gallerySlots.map(({ image_number, scene, img }) => {
+            const sceneIdx = image_number - 1;
+            const isEditing = editingIdx === sceneIdx;
+            const isRegenerating = regenIdx === image_number;
+            return (
+              <div key={image_number} className="group">
+                {img ? (
+                <div
+                  className="relative rounded-xl overflow-hidden border border-gray-800 bg-gray-900 cursor-pointer
+                             hover:border-gray-600 transition-colors"
+                  onClick={() => {
+                    const idx = imageIndexByNumber.get(image_number);
+                    if (idx !== undefined) setLightboxIdx(idx);
+                  }}
+                >
+                  <img
+                    src={mangaThumbUrl(img.image_path, 1280, isRegenerating ? Date.now() : undefined)!}
+                    alt={`Panel ${image_number}`}
+                    className={`w-full object-contain ${isRegenerating ? 'opacity-30' : ''}`}
+                    loading="lazy"
+                    decoding="async"
+                  />
+                  <div className="absolute top-3 left-3 px-2 py-0.5 bg-black/70 rounded text-[10px] text-gray-300 font-mono">
+                    {image_number}/{imageCount}
+                  </div>
+                  {scenes[image_number - 1] && !isRegenerating && !generating && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleRegenImage(image_number);
+                      }}
+                      className="absolute top-3 right-3 p-1.5 rounded-md bg-black/70 hover:bg-amber-500 text-white hover:text-gray-950 transition-colors"
+                      title="重新生成此图"
+                    >
+                      <RefreshCw size={12} />
+                    </button>
+                  )}
+                  {isRegenerating && (
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <div className="flex flex-col items-center gap-2">
+                        <Loader2 size={32} className="animate-spin text-amber-400" />
+                        <span className="text-sm text-gray-300">重新生成中…</span>
+                      </div>
+                    </div>
+                  )}
+                  {!isRegenerating && (
+                    <div className="absolute inset-0 bg-black/0 hover:bg-black/10 transition-colors flex items-center justify-center opacity-0 hover:opacity-100">
+                      <span className="bg-black/60 text-white text-xs px-3 py-1 rounded-full">点击放大</span>
+                    </div>
+                  )}
+                </div>
+                ) : (
+                <div className="relative rounded-xl overflow-hidden border border-dashed border-gray-800 bg-gray-900/45 h-64 flex items-center justify-center">
+                  <div className="absolute top-3 left-3 px-2 py-0.5 bg-black/50 rounded text-[10px] text-gray-400 font-mono">
+                    {image_number}/{imageCount}
+                  </div>
+                  <div className="flex flex-col items-center gap-2 text-gray-600">
+                    {generating ? <Loader2 size={24} className="animate-spin" /> : <ImageIcon size={28} strokeWidth={1.5} />}
+                    <span className="text-xs">{generating ? '等待生成…' : '未生成'}</span>
+                  </div>
+                </div>
+                )}
+                {scene && (
+                  <div className="mt-2 rounded-lg border border-gray-800 bg-gray-900/40 p-2.5">
+                    <div className="flex items-start gap-2">
+                      {isEditing ? (
+                        <textarea
+                          value={editText}
+                          onChange={(e) => setEditText(e.target.value)}
+                          className="flex-1 bg-gray-800 text-xs text-gray-200 rounded p-2 resize-none outline-none border border-gray-700 focus:border-violet-500 leading-relaxed"
+                          rows={3}
+                          autoFocus
+                        />
+                      ) : (
+                        <div className="flex-1 min-w-0">
+                          <p className={`text-xs text-gray-500 leading-relaxed ${expandedScenes.has(sceneIdx) ? '' : 'line-clamp-2'}`}>
+                            {scene}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => toggleSceneExpanded(sceneIdx)}
+                            className="mt-1 text-xs text-violet-400 hover:text-violet-300 transition-colors"
+                          >
+                            {expandedScenes.has(sceneIdx) ? '收起' : '展开'}
+                          </button>
+                        </div>
+                      )}
+                      <div className="shrink-0 flex items-center gap-1">
+                        {isEditing ? (
+                          <>
+                            <button onClick={() => handleSceneSave(sceneIdx)} className="p-1 rounded hover:bg-gray-700 text-green-400 transition-colors" title="保存"><Check size={13} /></button>
+                            <button onClick={() => setEditingIdx(-1)} className="p-1 rounded hover:bg-gray-700 text-gray-500 transition-colors" title="取消"><X size={13} /></button>
+                          </>
+                        ) : (
+                          <button onClick={() => handleSceneEdit(sceneIdx)} className="p-1 rounded hover:bg-gray-700 text-gray-600 hover:text-gray-300 transition-colors" title="编辑分镜"><Pencil size={12} /></button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Loading placeholders */}
+        {generating && scenes.length === 0 && displayImages.length < activeImageCount && (
+          <div className="mt-6 space-y-6">
+            {Array.from({ length: Math.max(activeImageCount - displayImages.length, 0) }, (_, i) => (
+              <div
+                key={`placeholder-${i}`}
+                className="rounded-xl border border-gray-800 bg-gray-900/50 h-64 flex items-center justify-center"
+              >
+                <div className="flex flex-col items-center gap-2 text-gray-700">
+                  <Loader2 size={24} className="animate-spin" />
+                  <span className="text-xs">等待生成…</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Lightbox with scroll navigation */}
+      {lightboxImg && (
+        <div
+          ref={lightboxRef}
+          className="fixed inset-0 z-50 bg-black/95 flex flex-col items-center justify-center cursor-pointer select-none"
+          onClick={() => setLightboxIdx(-1)}
+        >
+          {/* Close */}
+          <button
+            className="absolute top-4 right-4 p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors z-10"
+            onClick={(e) => { e.stopPropagation(); setLightboxIdx(-1); }}
+          >
+            <X size={24} />
+          </button>
+          {/* Counter */}
+          <div className="absolute top-4 left-4 px-3 py-1 bg-white/10 rounded-full text-sm text-white font-mono">
+            {lightboxImg.image_number} / {imageCount}
+          </div>
+          {/* Nav up */}
+          {lightboxIdx > 0 && (
+            <button
+              className="absolute top-16 left-1/2 -translate-x-1/2 p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors z-10"
+              onClick={(e) => { e.stopPropagation(); handleLightboxNav('prev'); }}
+            >
+              <ChevronUp size={20} />
+            </button>
+          )}
+          {/* Image */}
+          <img
+            src={mangaImageUrl(lightboxImg.image_path)}
+            alt={`Panel ${lightboxImg.image_number}`}
+            className="max-w-[90%] max-h-[75vh] object-contain rounded-lg"
+            onClick={(e) => e.stopPropagation()}
+          />
+          {/* Nav down */}
+          {lightboxIdx < displayImages.length - 1 && (
+            <button
+              className="absolute bottom-16 left-1/2 -translate-x-1/2 p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors z-10"
+              onClick={(e) => { e.stopPropagation(); handleLightboxNav('next'); }}
+            >
+              <ChevronDown size={20} />
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Reference images management modal */}
+      {refModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => setRefModalOpen(false)}
+        >
+          <div
+            className="w-full max-w-2xl bg-gray-900 border border-gray-800 rounded-xl shadow-2xl max-h-[85vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-3 border-b border-gray-800">
+              <div className="flex items-center gap-2">
+                <ImagePlus size={16} className="text-emerald-400" />
+                <h3 className="text-sm font-semibold text-gray-200">垫图管理</h3>
+                <span className="text-xs text-gray-500">
+                  {refImages.length}/{refMax} 张
+                  {(refSource === 'story' || refSource === 'asset_group') && refImages.length > 0 && (
+                    <span className="ml-2 text-blue-400">· 继承自全局</span>
+                  )}
+                </span>
+              </div>
+              <button
+                onClick={() => setRefModalOpen(false)}
+                className="p-1 text-gray-500 hover:text-white rounded transition-colors"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5">
+              <p className="text-xs text-gray-500 mb-4 leading-relaxed">
+                上传角色参考图，AI 生成漫画时会保持人物外貌一致性。
+                {(refSource === 'story' || refSource === 'asset_group') && refImages.length > 0 && (
+                  <> 当前显示首页设置的全局垫图；上传新图将创建本话专属垫图覆盖全局。</>
+                )}
+              </p>
+              {refImages.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-gray-600 text-sm gap-2 border border-dashed border-gray-800 rounded-lg">
+                  <ImagePlus size={32} className="opacity-50" />
+                  <span>还没有垫图，点击下方按钮上传</span>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                  {refImages.map((img) => (
+                    <div
+                      key={img.filename}
+                      className="relative group aspect-square rounded-lg overflow-hidden border border-gray-800 bg-gray-950"
+                    >
+                      <img
+                        src={mangaThumbUrl(img.image_path, 480, img.filename)!}
+                        alt={img.filename}
+                        className="w-full h-full object-cover"
+                        loading="lazy"
+                        decoding="async"
+                      />
+                      <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors flex items-end justify-between p-2 pointer-events-none">
+                        <span className="text-[10px] text-white/80 bg-black/60 px-1.5 py-0.5 rounded">
+                          {img.size_kb} KB
+                        </span>
+                      </div>
+                      {refSource === 'chapter' && chapter && (
+                        <button
+                          onClick={async () => {
+                            try {
+                              const r = await deleteChapterRefImage(chapter.id, img.filename);
+                              setRefImages(r.images);
+                              setRefSource(r.source ?? (r.images.length ? 'chapter' : 'none'));
+                              setRefMax(r.max);
+                              if (r.images.length === 0) {
+                                // After deleting last chapter ref, reload to pick up story fallback
+                                const next = await getChapterRefImages(chapter.id);
+                                setRefImages(next.images);
+                                setRefSource(next.source ?? (next.images.length ? 'chapter' : 'none'));
+                              }
+                            } catch (err: any) {
+                              setErrorMsg(`删除垫图失败: ${err.message}`);
+                            }
+                          }}
+                          className="absolute top-1.5 right-1.5 p-1 rounded-md bg-red-600 hover:bg-red-500 text-white shadow-lg transition-colors"
+                          title="删除"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="px-5 py-3 border-t border-gray-800 flex items-center justify-between gap-2">
+              <span className="text-xs text-gray-500">
+                {refSource === 'chapter'
+                  ? '本话自定义垫图（覆盖全局）'
+                  : refSource === 'story' || refSource === 'asset_group'
+                    ? '当前显示全局垫图'
+                    : '尚未上传垫图'}
+              </span>
+              <button
+                onClick={() => refFileRef.current?.click()}
+                disabled={!chapter || refUploading || refImages.length >= refMax && refSource === 'chapter'}
+                className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium rounded-md
+                           bg-violet-600 hover:bg-violet-500 text-white
+                           disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                title={
+                  refImages.length >= refMax && refSource === 'chapter'
+                    ? `已达上限 ${refMax} 张`
+                    : '上传一张垫图'
+                }
+              >
+                {refUploading ? <Loader2 size={13} className="animate-spin" /> : <ImagePlus size={13} />}
+                {(refSource === 'story' || refSource === 'asset_group') && refImages.length > 0 ? '上传本话垫图（覆盖全局）' : '添加垫图'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
