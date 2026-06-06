@@ -254,22 +254,6 @@ python -m py_compile backend\config.py backend\main.py backend\services\image2.p
 - 可以导出作品包。
 - 重启后端后，SQLite 数据仍能正常读取。
 
-## 安全说明
-
-请不要提交以下文件：
-
-- `backend/.env`
-- `backend/manga.db`
-- `backend/manga_outputs/`
-- `frontend/node_modules/`
-- `frontend/dist/`
-
-这些文件已在 `.gitignore` 中排除。
-
-## Fork 说明
-
-这是基于原项目思路继续改造的个人升级版本，重点增强了视觉设计、稳定性、本地运行体验和工程配置。继续二次开发时，请保留原项目许可证要求，并根据你的仓库情况补充 LICENSE、贡献说明和部署文档。
-
 ## License
 
 MIT
