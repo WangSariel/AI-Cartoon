@@ -1,0 +1,47 @@
+# ─── Environment & Secrets ───
+.env
+backend/.env
+
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.db
+*.sqlite3
+venv/
+.venv/
+
+# ─── Node ───
+node_modules/
+frontend/node_modules/
+
+# ─── Generated outputs (large images/data) ───
+backend/manga_outputs/
+test_novel_output.md
+test_ref_C.png
+
+# ─── IDE & OS ───
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.spec-workflow/
+
+# ─── Misc test files ───
+test/
+releases/
+test_*.py
+test_*.png
+test_*.txt
+generate_image.py
+微信图片_*
+
+# ─── MD files (except README) ───
+*.md
+!README.md
