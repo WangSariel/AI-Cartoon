@@ -26,6 +26,13 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _csv_env(name: str) -> list[str]:
     return [item.strip() for item in os.getenv(name, "").split(",") if item.strip()]
 
@@ -53,11 +60,13 @@ class Settings:
     sse_queue_size: int = _int_env("SSE_QUEUE_SIZE", 300)
     job_event_history_limit: int = _int_env("JOB_EVENT_HISTORY_LIMIT", 300)
 
-    image_api_base_url: str = os.getenv("IMAGE_API_BASE_URL", "https://aihubmix.com/v1")
+    image_api_base_url: str = os.getenv("IMAGE_API_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
     image_api_base_url_fallback: str = os.getenv("IMAGE_API_BASE_URL_FALLBACK", "")
-    image_api_key: str = os.getenv("IMAGE_API_KEY", "")
-    image_model: str = os.getenv("IMAGE_MODEL", "gpt-image-2")
-    image_size: str = os.getenv("IMAGE_SIZE", "1024x1536")
+    image_api_key: str = os.getenv("IMAGE_API_KEY", os.getenv("ARK_API_KEY", ""))
+    image_model: str = os.getenv("IMAGE_MODEL", "doubao-seedream-5-0-260128")
+    image_size: str = os.getenv("IMAGE_SIZE", "2K")
+    image_output_format: str = os.getenv("IMAGE_OUTPUT_FORMAT", "png")
+    image_watermark: bool = _bool_env("IMAGE_WATERMARK", False)
     image_max_retries: int = _int_env("IMAGE_MAX_RETRIES", 6)
     image_retry_base_seconds: float = _float_env("IMAGE_RETRY_BASE_SECONDS", 1.0)
     image_retry_max_seconds: float = _float_env("IMAGE_RETRY_MAX_SECONDS", 30.0)

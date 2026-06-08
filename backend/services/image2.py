@@ -23,7 +23,7 @@ from .errors import MissingApiKeyError
 
 logger = logging.getLogger("image2")
 
-DEFAULT_IMAGE_API_BASE_URL = "https://aihubmix.com/v1"
+DEFAULT_IMAGE_API_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 NON_RETRYABLE_STATUS_CODES = {400, 401, 402, 403, 404}
 RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 UNKNOWN_EXCEPTION_RETRIES = 1
@@ -55,6 +55,8 @@ IMAGE_API_BASE_URL_FALLBACK = (
 IMAGE_API_KEY = settings.image_api_key
 IMAGE_MODEL = settings.image_model
 IMAGE_SIZE = settings.image_size
+IMAGE_OUTPUT_FORMAT = settings.image_output_format
+IMAGE_WATERMARK = settings.image_watermark
 OUTPUT_DIR = MANGA_OUTPUTS_DIR
 MAX_RETRIES = max(1, settings.image_max_retries)
 
@@ -141,6 +143,10 @@ def _friendly_status_message(resp: httpx.Response) -> str:
     }
     prefix = messages.get(resp.status_code)
     return f"{prefix}（{raw}）" if prefix else raw
+
+
+def _is_ark_endpoint(endpoint_url: str) -> bool:
+    return "ark.cn-beijing.volces.com/api/v3" in endpoint_url.lower()
 
 
 def _friendly_retry_reason(reason: str) -> str:
@@ -287,7 +293,7 @@ async def _post_image_request(
     api_key: str | None,
 ) -> httpx.Response:
     client = await get_image_client()
-    if ref_blobs:
+    if ref_blobs and not _is_ark_endpoint(endpoint.url):
         files = (
             [("image", (ref_blobs[0][0], io.BytesIO(ref_blobs[0][1]), "image/png"))]
             if len(ref_blobs) == 1
@@ -299,9 +305,19 @@ async def _post_image_request(
             data={"model": IMAGE_MODEL, "prompt": full_prompt, "size": IMAGE_SIZE},
             headers=_image_auth_headers(api_key),
         )
+    payload = {
+        "model": IMAGE_MODEL,
+        "prompt": full_prompt,
+        "size": IMAGE_SIZE,
+    }
+    if _is_ark_endpoint(endpoint.url):
+        payload.update({
+            "output_format": IMAGE_OUTPUT_FORMAT,
+            "watermark": IMAGE_WATERMARK,
+        })
     return await client.post(
         f"{endpoint.url}/images/generations",
-        json={"model": IMAGE_MODEL, "prompt": full_prompt, "size": IMAGE_SIZE},
+        json=payload,
         headers=_image_auth_headers(api_key, json_content=True),
     )
 
@@ -329,13 +345,16 @@ async def generate_manga_image(
     total_pages = len(all_scenes) if all_scenes else 1
     progress_label = f"{image_number}/{total_pages}"
     ref_blobs = await _load_reference_blobs(ref_image_paths, progress_label)
+    use_ref_images = bool(ref_blobs) and not _is_ark_endpoint(IMAGE_API_BASE_URL)
+    if ref_blobs and not use_ref_images:
+        logger.info("[%s] Ark images/generations 暂不发送垫图文件，将使用角色文字设定保持一致性", progress_label)
     full_prompt = _build_prompt(
         prompt=prompt,
         image_number=image_number,
         total_pages=total_pages,
         all_scenes=all_scenes,
         character_profiles=character_profiles,
-        use_ref=bool(ref_blobs),
+        use_ref=use_ref_images,
         color_mode=color_mode,
     )
 
@@ -351,7 +370,7 @@ async def generate_manga_image(
             endpoint = endpoints[0]
 
         try:
-            mode = f"edits({len(ref_blobs)}图垫图)" if ref_blobs else "generations"
+            mode = f"edits({len(ref_blobs)}图垫图)" if ref_blobs and not _is_ark_endpoint(endpoint.url) else "generations"
             logger.info(
                 "[%s] 开始调用图片 API [%s] endpoint=%s attempt=%s/%s",
                 progress_label,
