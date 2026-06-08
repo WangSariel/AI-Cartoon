@@ -259,6 +259,10 @@ python -m py_compile backend\config.py backend\main.py backend\services\image2.p
 - 可以导出作品包。
 - 重启后端后，SQLite 数据仍能正常读取。
 
+## 生成效果如图
+<img width="1664" height="2496" alt="image" src="https://github.com/user-attachments/assets/36c402bf-50ad-454f-bb71-ee464e44960f" />
+
+
 ## License
 
 MIT
