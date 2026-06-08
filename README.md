@@ -38,7 +38,7 @@ AI-Cartoon 是一个面向小说创作与漫画分镜生成的 AI 工作台。�
 AI 服务：
 
 - DeepSeek API：用于对话、小说生成和分镜生成
-- Volcengine Ark Image API：用于漫画图片生成，默认模型为 doubao-seedream-5-0
+- OpenAI-compatible Image API：用于漫画图片生成，默认配置为 AIHubMix
 
 ## 项目结构
 
@@ -99,15 +99,12 @@ DATABASE_URL=sqlite:///./manga.db
 # DeepSeek
 DEEPSEEK_API_KEY=
 
-# Image API / Volcengine Ark
-ARK_API_KEY=
+# Image API
 IMAGE_API_KEY=
-IMAGE_API_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+IMAGE_API_BASE_URL=https://aihubmix.com/v1
 IMAGE_API_BASE_URL_FALLBACK=
-IMAGE_MODEL=doubao-seedream-5-0-260128
-IMAGE_SIZE=2K
-IMAGE_OUTPUT_FORMAT=png
-IMAGE_WATERMARK=false
+IMAGE_MODEL=gpt-image-2
+IMAGE_SIZE=1024x1536
 IMAGE_MAX_RETRIES=6
 IMAGE_REQUEST_TIMEOUT_SECONDS=300
 
@@ -118,8 +115,7 @@ PORT=8000
 
 说明：
 
-- `DEEPSEEK_API_KEY` 和图片 API Key 可以写在 `backend/.env`，也可以在网页右下角的 API Key 设置中填写。
-- 火山 Ark 推荐使用 `ARK_API_KEY`；前端设置弹窗仍会通过兼容的 `IMAGE_API_KEY` 传给后端。
+- `DEEPSEEK_API_KEY` 和 `IMAGE_API_KEY` 可以写在 `backend/.env`，也可以在网页右下角的 API Key 设置中填写。
 - `backend/.env` 不会被 Git 提交，请不要把真实密钥写入 README 或公开仓库。
 - 默认数据库是 SQLite，后端启动后会自动创建 `backend/manga.db`。
 
@@ -153,43 +149,25 @@ http://localhost:5173
 
 ## 图片生成配置
 
-当前默认图片接口为火山 Ark：
+当前默认图片接口：
 
 ```env
-ARK_API_KEY=
-IMAGE_API_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
-IMAGE_MODEL=doubao-seedream-5-0-260128
-IMAGE_SIZE=2K
-IMAGE_OUTPUT_FORMAT=png
-IMAGE_WATERMARK=false
-```
-
-后端实际请求等价于：
-
-```powershell
-curl https://ark.cn-beijing.volces.com/api/v3/images/generations `
-  -H "Content-Type: application/json" `
-  -H "Authorization: Bearer $ARK_API_KEY" `
-  -d '{
-    "model": "doubao-seedream-5-0-260128",
-    "prompt": "<漫画分镜提示词>",
-    "size": "2K",
-    "output_format": "png",
-    "watermark": false
-  }'
+IMAGE_API_BASE_URL=https://aihubmix.com/v1
+IMAGE_MODEL=gpt-image-2
 ```
 
 如果你的图片服务不稳定，可以配置备用 endpoint：
 
 ```env
-IMAGE_API_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+IMAGE_API_BASE_URL=https://aihubmix.com/v1
 IMAGE_API_BASE_URL_FALLBACK=https://your-openai-compatible-proxy.example/v1
 ```
 
-备用 endpoint 必须兼容以下接口和响应格式：
+备用 endpoint 必须兼容以下接口：
 
 ```text
-POST /images/generations
+POST /v1/images/generations
+POST /v1/images/edits
 ```
 
 图片生成已内置：
@@ -206,6 +184,11 @@ POST /images/generations
 
 本地开发默认使用 SQLite：
 
+```env
+DATABASE_URL=sqlite:///./manga.db
+```
+
+如果你想切换到 PostgreSQL，可以启动 Docker Compose 中的数据库：
 ```env
 DATABASE_URL=sqlite:///./manga.db
 ```
@@ -275,22 +258,6 @@ python -m py_compile backend\config.py backend\main.py backend\services\image2.p
 - 图片生成失败时，错误提示应为柔和提示框，不应出现刺眼红色警示块。
 - 可以导出作品包。
 - 重启后端后，SQLite 数据仍能正常读取。
-
-## 安全说明
-
-请不要提交以下文件：
-
-- `backend/.env`
-- `backend/manga.db`
-- `backend/manga_outputs/`
-- `frontend/node_modules/`
-- `frontend/dist/`
-
-这些文件已在 `.gitignore` 中排除。
-
-## Fork 说明
-
-这是基于原项目思路继续改造的个人升级版本，重点增强了视觉设计、稳定性、本地运行体验和工程配置。继续二次开发时，请保留原项目许可证要求，并根据你的仓库情况补充 LICENSE、贡献说明和部署文档。
 
 ## License
 
