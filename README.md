@@ -38,7 +38,7 @@ AI-Cartoon 是一个面向小说创作与漫画分镜生成的 AI 工作台。�
 AI 服务：
 
 - DeepSeek API：用于对话、小说生成和分镜生成
-- OpenAI-compatible Image API：用于漫画图片生成，默认配置为 AIHubMix
+- 火山方舟Doubao seedrem5.0模型 API：用于漫画图片生成可以自己选用open AI获得更好的效果
 
 ## 项目结构
 
